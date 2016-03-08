@@ -21,6 +21,7 @@ namespace Microsoft.DbContextPackage.Handlers
     using Microsoft.VisualStudio.Data.Services;
     using Microsoft.VisualStudio.Shell;
     using Project = EnvDTE.Project;
+    using System.Windows;
 
     internal class ReverseEngineerCodeFirstHandler
     {
@@ -45,168 +46,203 @@ namespace Microsoft.DbContextPackage.Handlers
             try
             {
                 var startTime = DateTime.Now;
+                string connectionString = string.Empty;
+                string providerInvariant = string.Empty;
+                string databaseName = string.Empty;
+                bool isNewConnectionString = false;
 
-                // Show dialog with SqlClient selected by default
-                var dialogFactory = _package.GetService<IVsDataConnectionDialogFactory>();
-                var dialog = dialogFactory.CreateConnectionDialog();
-                dialog.AddAllSources();
-                dialog.SelectedSource = new Guid("067ea0d9-ba62-43f7-9106-34930c60c528");
-                var dialogResult = dialog.ShowDialog(connect: true);
+                // Show available connection string
+                var existingConnections = GetConnectionstrings(project);
 
-                if (dialogResult != null)
+                Connections connectionDialog = new Connections(existingConnections.Select(x => x.Name));
+                connectionDialog.ShowModal();
+                if (connectionDialog.IsConnectionStringSelected)
                 {
-                    // Find connection string and provider
-                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_LoadSchema;
-                    var connection = (DbConnection)dialogResult.GetLockedProviderObject();
-                    var connectionString = connection.ConnectionString;
-                    var providerManager = (IVsDataProviderManager)Package.GetGlobalService(typeof(IVsDataProviderManager));
-                    IVsDataProvider dp;
-                    providerManager.Providers.TryGetValue(dialogResult.Provider, out dp);
-                    var providerInvariant = (string)dp.GetProperty("InvariantName");
+                    var selected = connectionDialog.SelectedConnectionString;
 
-                    // Load store schema
-                    var storeGenerator = new EntityStoreSchemaGenerator(providerInvariant, connectionString, "dbo");
-                    storeGenerator.GenerateForeignKeyProperties = true;
-                    var errors = storeGenerator.GenerateStoreMetadata(_storeMetadataFilters).Where(e => e.Severity == EdmSchemaErrorSeverity.Error);
-                    errors.HandleErrors(Strings.ReverseEngineer_SchemaError);
+                    var selectedConnectionSetting = existingConnections.First(x => x.Name.Equals(selected));
+                    providerInvariant = selectedConnectionSetting.ProviderName;
+                    connectionString = selectedConnectionSetting.ConnectionString;
+                    var db = new DbConnectionStringBuilder();
+                    
+                    db.ConnectionString = connectionString;
+                    databaseName = Convert.ToString(GetDatabaseName(db, "initial catalog", "database"));
+                }
+                else
+                {
+                    // Show dialog with SqlClient selected by default
+                    var dialogFactory = _package.GetService<IVsDataConnectionDialogFactory>();
+                    var dialog = dialogFactory.CreateConnectionDialog();
+                    dialog.AddAllSources();
+                    dialog.SelectedSource = new Guid("067ea0d9-ba62-43f7-9106-34930c60c528");
+                    var dialogResult = dialog.ShowDialog(connect: true);
 
-                    // Generate default mapping
-                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateMapping;
-                    var contextName = connection.Database.Replace(" ", string.Empty).Replace(".", string.Empty) + "Context";
-                    var modelGenerator = new EntityModelSchemaGenerator(storeGenerator.EntityContainer, "DefaultNamespace", contextName);
-                    modelGenerator.PluralizationService = PluralizationService.CreateService(new CultureInfo("en"));
-                    modelGenerator.GenerateForeignKeyProperties = true;
-                    modelGenerator.GenerateMetadata();
-
-                    // Pull out info about types to be generated
-                    var entityTypes = modelGenerator.EdmItemCollection.OfType<EntityType>().ToArray();
-                    var mappings = new EdmMapping(modelGenerator, storeGenerator.StoreItemCollection);
-
-                    // Find the project to add the code to
-                    var vsProject = (VSLangProj.VSProject)project.Object;
-                    var projectDirectory = new FileInfo(project.FileName).Directory;
-                    var defaultProjectNameSpace = (string)project.Properties.Item("RootNamespace").Value;
-                    var references = vsProject.References.Cast<VSLangProj.Reference>();
-
-                    if (!references.Any(r => r.Name == "EntityFramework"))
+                    if (dialogResult != null)
                     {
-                        // Add EF References
-                        _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_InstallEntityFramework;
-
-                        try
-                        {
-                            project.InstallPackage("EntityFramework");
-                        }
-                        catch (Exception ex)
-                        {
-                            _package.LogError(Strings.ReverseEngineer_InstallEntityFrameworkError, ex);
-                        }
+                        // Find connection string and provider
+                        _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_LoadSchema;
+                        var connection = (DbConnection)dialogResult.GetLockedProviderObject();
+                        connectionString = connection.ConnectionString;
+                        var providerManager = (IVsDataProviderManager)Package.GetGlobalService(typeof(IVsDataProviderManager));
+                        IVsDataProvider dp;
+                        providerManager.Providers.TryGetValue(dialogResult.Provider, out dp);
+                        providerInvariant = (string)dp.GetProperty("InvariantName");
+                        databaseName = connection.Database;
+                        isNewConnectionString = true;
                     }
-
-                    // Generate Entity Classes and Mappings
-                    var templateProcessor = new TemplateProcessor(project);
-                    var modelsNamespaceSuffixDefault = "Models";
-                    var mappingNamespaceSuffixDefault = "Mappings";
-
-                    var projectNamespace = defaultProjectNameSpace;
-                    var modelsNamespace = string.Concat(projectNamespace, ".", modelsNamespaceSuffixDefault);
-                    var mappingNamespace = string.Concat(modelsNamespace, ".", mappingNamespaceSuffixDefault);
-
-                    var modelsDirectory = projectDirectory.FullName;
-                    var mappingDirectory = projectDirectory.FullName;
-
-                    var entityFrameworkVersion = GetEntityFrameworkVersion(references);
-
-                    foreach (var entityType in entityTypes)
+                    else
                     {
-                        _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateClasses(entityType.Name);
-
-                        // Generate the code file
-                        var entityHost = new EfTextTemplateHost
-                            {
-                                EntityType = entityType,
-                                EntityContainer = modelGenerator.EntityContainer,
-                                Namespace = projectNamespace,
-                                ModelsNamespace = modelsNamespace,
-                                MappingNamespace = mappingNamespace,
-                                EntityFrameworkVersion = entityFrameworkVersion,
-                                TableSet = mappings.EntityMappings[entityType].Item1,
-                                PropertyToColumnMappings = mappings.EntityMappings[entityType].Item2,
-                                ManyToManyMappings = mappings.ManyToManyMappings
-                            };
-
-
-                        var entityContents = templateProcessor.Process(Templates.EntityTemplate, entityHost);
-
-                        ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
-                                                            projectNamespace,
-                                                            entityHost.ModelsNamespace,
-                                                            modelsNamespaceSuffixDefault,
-                                                            projectDirectory.FullName,
-                                                            ref modelsDirectory);
-
-                        var filePath = Path.Combine(modelsDirectory, entityType.Name + entityHost.FileExtension);
-                        project.AddNewFile(filePath, entityContents);
-
-                        var mappingHost = new EfTextTemplateHost
-                            {
-                                EntityType = entityType,
-                                EntityContainer = modelGenerator.EntityContainer,
-                                Namespace = projectNamespace,
-                                ModelsNamespace = modelsNamespace,
-                                MappingNamespace = mappingNamespace,
-                                EntityFrameworkVersion = entityFrameworkVersion,
-                                TableSet = mappings.EntityMappings[entityType].Item1,
-                                PropertyToColumnMappings = mappings.EntityMappings[entityType].Item2,
-                                ManyToManyMappings = mappings.ManyToManyMappings
-                            };
-
-                        var mappingContents = templateProcessor.Process(Templates.MappingTemplate, mappingHost);
-
-                        ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
-                                                            projectNamespace,
-                                                            mappingHost.MappingNamespace,
-                                                            mappingNamespaceSuffixDefault,
-                                                            projectDirectory.FullName,
-                                                            ref mappingDirectory);
-
-                        var mappingFilePath = Path.Combine(mappingDirectory, entityType.Name + "Map" + mappingHost.FileExtension);
-                        project.AddNewFile(mappingFilePath, mappingContents);
+                        // Use selected not to proceed by clicking cancel or closes window.
+                        return;
                     }
+                }
 
-                    // Generate Context
-                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateContext;
-                    var contextHost = new EfTextTemplateHost
+                // Load store schema
+                var storeGenerator = new EntityStoreSchemaGenerator(providerInvariant, connectionString, "dbo");
+                storeGenerator.GenerateForeignKeyProperties = true;
+                var errors = storeGenerator.GenerateStoreMetadata(_storeMetadataFilters).Where(e => e.Severity == EdmSchemaErrorSeverity.Error);
+                errors.HandleErrors(Strings.ReverseEngineer_SchemaError);
+
+                // Generate default mapping
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateMapping;
+                var contextName = databaseName.Replace(" ", string.Empty).Replace(".", string.Empty) + "Context";
+                var modelGenerator = new EntityModelSchemaGenerator(storeGenerator.EntityContainer, "DefaultNamespace", contextName);
+                modelGenerator.PluralizationService = PluralizationService.CreateService(new CultureInfo("en"));
+                modelGenerator.GenerateForeignKeyProperties = true;
+                modelGenerator.GenerateMetadata();
+
+                // Pull out info about types to be generated
+                var entityTypes = modelGenerator.EdmItemCollection.OfType<EntityType>().ToArray();
+                var mappings = new EdmMapping(modelGenerator, storeGenerator.StoreItemCollection);
+
+                // Find the project to add the code to
+                var vsProject = (VSLangProj.VSProject)project.Object;
+                var projectDirectory = new FileInfo(project.FileName).Directory;
+                var defaultProjectNameSpace = (string)project.Properties.Item("RootNamespace").Value;
+                var references = vsProject.References.Cast<VSLangProj.Reference>();
+
+                if (!references.Any(r => r.Name == "EntityFramework"))
+                {
+                    // Add EF References
+                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_InstallEntityFramework;
+
+                    try
+                    {
+                        project.InstallPackage("EntityFramework");
+                    }
+                    catch (Exception ex)
+                    {
+                        _package.LogError(Strings.ReverseEngineer_InstallEntityFrameworkError, ex);
+                    }
+                }
+
+                // Generate Entity Classes and Mappings
+                var templateProcessor = new TemplateProcessor(project);
+                var modelsNamespaceSuffixDefault = "Models";
+                var mappingNamespaceSuffixDefault = "Mappings";
+
+                var projectNamespace = defaultProjectNameSpace;
+                var modelsNamespace = string.Concat(projectNamespace, ".", modelsNamespaceSuffixDefault);
+                var mappingNamespace = string.Concat(modelsNamespace, ".", mappingNamespaceSuffixDefault);
+
+                var modelsDirectory = projectDirectory.FullName;
+                var mappingDirectory = projectDirectory.FullName;
+
+                var entityFrameworkVersion = GetEntityFrameworkVersion(references);
+
+                foreach (var entityType in entityTypes)
+                {
+                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateClasses(entityType.Name);
+
+                    // Generate the code file
+                    var entityHost = new EfTextTemplateHost
                         {
+                            EntityType = entityType,
                             EntityContainer = modelGenerator.EntityContainer,
                             Namespace = projectNamespace,
                             ModelsNamespace = modelsNamespace,
                             MappingNamespace = mappingNamespace,
-                            EntityFrameworkVersion = entityFrameworkVersion
+                            EntityFrameworkVersion = entityFrameworkVersion,
+                            TableSet = mappings.EntityMappings[entityType].Item1,
+                            PropertyToColumnMappings = mappings.EntityMappings[entityType].Item2,
+                            ManyToManyMappings = mappings.ManyToManyMappings
                         };
 
-                    var contextContents = templateProcessor.Process(Templates.ContextTemplate, contextHost);
+
+                    var entityContents = templateProcessor.Process(Templates.EntityTemplate, entityHost);
 
                     ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
-                                                        defaultProjectNameSpace,
-                                                        contextHost.Namespace,
+                                                        projectNamespace,
+                                                        entityHost.ModelsNamespace,
                                                         modelsNamespaceSuffixDefault,
                                                         projectDirectory.FullName,
                                                         ref modelsDirectory);
 
-                    var contextFilePath = Path.Combine(modelsDirectory, modelGenerator.EntityContainer.Name + contextHost.FileExtension);
-                    var contextItem = project.AddNewFile(contextFilePath, contextContents);
-                    AddConnectionStringToConfigFile(project, connectionString, providerInvariant, modelGenerator.EntityContainer.Name);
+                    var filePath = Path.Combine(modelsDirectory, entityType.Name + entityHost.FileExtension);
+                    project.AddNewFile(filePath, entityContents);
 
-                    if (contextItem != null)
-                    {
-                        // Open context class when done
-                        _package.DTE2.ItemOperations.OpenFile(contextFilePath);
-                    }
+                    var mappingHost = new EfTextTemplateHost
+                        {
+                            EntityType = entityType,
+                            EntityContainer = modelGenerator.EntityContainer,
+                            Namespace = projectNamespace,
+                            ModelsNamespace = modelsNamespace,
+                            MappingNamespace = mappingNamespace,
+                            EntityFrameworkVersion = entityFrameworkVersion,
+                            TableSet = mappings.EntityMappings[entityType].Item1,
+                            PropertyToColumnMappings = mappings.EntityMappings[entityType].Item2,
+                            ManyToManyMappings = mappings.ManyToManyMappings
+                        };
 
-                    var duration = DateTime.Now - startTime;
-                    _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_Complete(duration.ToString(@"h\:mm\:ss"));
+                    var mappingContents = templateProcessor.Process(Templates.MappingTemplate, mappingHost);
+
+                    ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
+                                                        projectNamespace,
+                                                        mappingHost.MappingNamespace,
+                                                        mappingNamespaceSuffixDefault,
+                                                        projectDirectory.FullName,
+                                                        ref mappingDirectory);
+
+                    var mappingFilePath = Path.Combine(mappingDirectory, entityType.Name + "Map" + mappingHost.FileExtension);
+                    project.AddNewFile(mappingFilePath, mappingContents);
                 }
+
+                // Generate Context
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateContext;
+                var contextHost = new EfTextTemplateHost
+                    {
+                        EntityContainer = modelGenerator.EntityContainer,
+                        Namespace = projectNamespace,
+                        ModelsNamespace = modelsNamespace,
+                        MappingNamespace = mappingNamespace,
+                        EntityFrameworkVersion = entityFrameworkVersion
+                    };
+
+                var contextContents = templateProcessor.Process(Templates.ContextTemplate, contextHost);
+
+                ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
+                                                    defaultProjectNameSpace,
+                                                    contextHost.Namespace,
+                                                    modelsNamespaceSuffixDefault,
+                                                    projectDirectory.FullName,
+                                                    ref modelsDirectory);
+
+                var contextFilePath = Path.Combine(modelsDirectory, modelGenerator.EntityContainer.Name + contextHost.FileExtension);
+                var contextItem = project.AddNewFile(contextFilePath, contextContents);
+                if (isNewConnectionString)
+                {
+                    AddConnectionStringToConfigFile(project, connectionString, providerInvariant, modelGenerator.EntityContainer.Name);
+                }
+
+                if (contextItem != null)
+                {
+                    // Open context class when done
+                    _package.DTE2.ItemOperations.OpenFile(contextFilePath);
+                }
+
+                var duration = DateTime.Now - startTime;
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_Complete(duration.ToString(@"h\:mm\:ss"));
+                //}
             }
             catch (Exception exception)
             {
@@ -273,6 +309,29 @@ namespace Microsoft.DbContextPackage.Handlers
             project.ProjectItems.AddFromFile(configFilePath);
         }
 
+        private static IEnumerable<ConnectionStringSettings> GetConnectionstrings(Project project)
+        {
+            // Find App.config or Web.config
+            var configFilePath = Path.Combine(
+                project.GetProjectDir(),
+                project.IsWebProject()
+                    ? "Web.config"
+                    : "App.config");
+
+            // Either load up the existing file or create a blank file
+            var config = ConfigurationManager.OpenMappedExeConfiguration(
+                new ExeConfigurationFileMap { ExeConfigFilename = configFilePath },
+                ConfigurationUserLevel.None);
+
+            // Find or create the connectionStrings section
+            var connectionStrings = config.ConnectionStrings
+                .ConnectionStrings
+                .Cast<ConnectionStringSettings>()
+                .Where(x => !x.Name.Equals("localsqlserver", StringComparison.InvariantCultureIgnoreCase));
+
+            return connectionStrings;
+        }
+
         private static string FixUpConnectionString(string connectionString, string providerName)
         {
             DebugCheck.NotEmpty(providerName);
@@ -289,6 +348,20 @@ namespace Microsoft.DbContextPackage.Handlers
             builder.Remove("Pooling");
 
             return builder.ToString();
+        }
+
+        private static string GetDatabaseName(DbConnectionStringBuilder builder, params string[] aliases)
+        {
+            object dbName = null;
+            foreach (var alias in aliases)
+            {
+                if(builder.TryGetValue(alias, out dbName))
+                {
+                    return (string)dbName;
+                }
+            }
+
+            return null;
         }
 
         private class EdmMapping
