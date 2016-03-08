@@ -38,9 +38,11 @@ namespace Microsoft.DbContextPackage
             {
                 this.SetEmpty();
             }
-
-            this.cmbConnStrings.ItemsSource = connectionStrings;
-            this.cmbConnStrings.SelectionChanged += cmbColors_SelectionChanged;
+            else
+            {
+                this.cmbConnStrings.ItemsSource = connectionStrings;
+                this.cmbConnStrings.SelectionChanged += cmbColors_SelectionChanged;
+            }
         }
 
         private void btnCreateNew_Click(object sender, RoutedEventArgs e)
