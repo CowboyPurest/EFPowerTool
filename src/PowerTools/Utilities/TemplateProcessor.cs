@@ -10,18 +10,19 @@ namespace Microsoft.DbContextPackage.Utilities
     using Microsoft.VisualStudio.Shell;
     using Microsoft.VisualStudio.TextTemplating;
     using Microsoft.VisualStudio.TextTemplating.VSHost;
+    using System.Collections.Concurrent;
 
     internal class TemplateProcessor
     {
         private readonly Project _project;
-        private readonly IDictionary<string, string> _templateCache;
+        private readonly ConcurrentDictionary<string, string> _templateCache;
 
         public TemplateProcessor(Project project)
         {
             DebugCheck.NotNull(project);
 
             _project = project;
-            _templateCache = new Dictionary<string, string>();
+            _templateCache = new ConcurrentDictionary<string, string>();
         }
 
         public string Process(string templatePath, EfTextTemplateHost host)
@@ -44,9 +45,11 @@ namespace Microsoft.DbContextPackage.Utilities
         {
             DebugCheck.NotEmpty(templatePath);
 
-            if (_templateCache.ContainsKey(templatePath))
+            string value;
+
+            if (_templateCache.TryGetValue(templatePath, out value))
             {
-                return _templateCache[templatePath];
+                return value;
             }
 
             var items = templatePath.Split('\\');
@@ -80,7 +83,7 @@ namespace Microsoft.DbContextPackage.Utilities
                 contents = Templates.GetDefaultTemplate(templatePath);
             }
 
-            _templateCache.Add(templatePath, contents);
+            _templateCache.TryAdd(templatePath, contents);
 
             return contents;
         }

@@ -9,17 +9,22 @@ namespace Microsoft.DbContextPackage.Utilities
 {
     internal class ProjectFilesPathGenUtility
     {
+        private static readonly object _syncLock = new object();
+
         internal static void SyncDirectoryWithNamespace(string projectNamespace, string namespaceToCompare, string defaultNamespaceSuffix, string defaultDirectory, ref string syncDirectoryPath)
         {
             if (string.Equals(syncDirectoryPath, defaultDirectory))
             {
-                if (!string.Equals(string.Concat(projectNamespace, ".", defaultNamespaceSuffix), namespaceToCompare, StringComparison.InvariantCultureIgnoreCase))
+                lock (_syncLock)
                 {
-                    syncDirectoryPath = Path.Combine(syncDirectoryPath, NamesspaceToDirectoryPath(namespaceToCompare, projectNamespace));
-                }
-                else
-                {
-                    syncDirectoryPath = Path.Combine(syncDirectoryPath, defaultNamespaceSuffix);
+                    if (!string.Equals(string.Concat(projectNamespace, ".", defaultNamespaceSuffix), namespaceToCompare, StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        syncDirectoryPath = Path.Combine(syncDirectoryPath, NamesspaceToDirectoryPath(namespaceToCompare, projectNamespace));
+                    }
+                    else
+                    {
+                        syncDirectoryPath = Path.Combine(syncDirectoryPath, defaultNamespaceSuffix);
+                    }
                 }
             }
         }

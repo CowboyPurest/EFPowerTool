@@ -20,8 +20,12 @@ namespace Microsoft.DbContextPackage.Handlers
     using Microsoft.VisualStudio.Data.Core;
     using Microsoft.VisualStudio.Data.Services;
     using Microsoft.VisualStudio.Shell;
-    using Project = EnvDTE.Project;
     using System.Windows;
+    using System.Threading.Tasks;
+    using System.Collections.Concurrent;
+    using System.Diagnostics;
+    using Project = EnvDTE.Project;
+
 
     internal class ReverseEngineerCodeFirstHandler
     {
@@ -45,7 +49,8 @@ namespace Microsoft.DbContextPackage.Handlers
 
             try
             {
-                var startTime = DateTime.Now;
+                Stopwatch watcher = new Stopwatch();
+                watcher.Start();
                 string connectionString = string.Empty;
                 string providerInvariant = string.Empty;
                 string databaseName = string.Empty;
@@ -63,10 +68,9 @@ namespace Microsoft.DbContextPackage.Handlers
                     var selectedConnectionSetting = existingConnections.First(x => x.Name.Equals(selected));
                     providerInvariant = selectedConnectionSetting.ProviderName;
                     connectionString = selectedConnectionSetting.ConnectionString;
-                    var db = new DbConnectionStringBuilder();
-                    
-                    db.ConnectionString = connectionString;
-                    databaseName = Convert.ToString(GetDatabaseName(db, "initial catalog", "database"));
+                    var dbConnection = DbProviderFactories.GetFactory(providerInvariant).CreateConnection();
+                    dbConnection.ConnectionString = connectionString;
+                    databaseName = dbConnection.Database;
                 }
                 else
                 {
@@ -80,7 +84,6 @@ namespace Microsoft.DbContextPackage.Handlers
                     if (dialogResult != null)
                     {
                         // Find connection string and provider
-                        _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_LoadSchema;
                         var connection = (DbConnection)dialogResult.GetLockedProviderObject();
                         connectionString = connection.ConnectionString;
                         var providerManager = (IVsDataProviderManager)Package.GetGlobalService(typeof(IVsDataProviderManager));
@@ -92,12 +95,14 @@ namespace Microsoft.DbContextPackage.Handlers
                     }
                     else
                     {
-                        // Use selected not to proceed by clicking cancel or closes window.
+                        // User selected not to proceed by clicking cancel or closes window.
                         return;
                     }
                 }
 
                 // Load store schema
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_LoadingSchema;
+
                 var storeGenerator = new EntityStoreSchemaGenerator(providerInvariant, connectionString, "dbo");
                 storeGenerator.GenerateForeignKeyProperties = true;
                 var errors = storeGenerator.GenerateStoreMetadata(_storeMetadataFilters).Where(e => e.Severity == EdmSchemaErrorSeverity.Error);
@@ -147,14 +152,17 @@ namespace Microsoft.DbContextPackage.Handlers
 
                 var modelsDirectory = projectDirectory.FullName;
                 var mappingDirectory = projectDirectory.FullName;
+                var contextDirectory = projectDirectory.FullName;
 
                 var entityFrameworkVersion = GetEntityFrameworkVersion(references);
+                ConcurrentDictionary<string, string> models = new ConcurrentDictionary<string, string>();
+                ConcurrentDictionary<string, string> maps = new ConcurrentDictionary<string, string>();
 
-                foreach (var entityType in entityTypes)
+                // Process the templates and generate content
+                Parallel.ForEach(entityTypes, (entityType) =>
                 {
                     _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateClasses(entityType.Name);
 
-                    // Generate the code file
                     var entityHost = new EfTextTemplateHost
                         {
                             EntityType = entityType,
@@ -171,15 +179,7 @@ namespace Microsoft.DbContextPackage.Handlers
 
                     var entityContents = templateProcessor.Process(Templates.EntityTemplate, entityHost);
 
-                    ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
-                                                        projectNamespace,
-                                                        entityHost.ModelsNamespace,
-                                                        modelsNamespaceSuffixDefault,
-                                                        projectDirectory.FullName,
-                                                        ref modelsDirectory);
-
-                    var filePath = Path.Combine(modelsDirectory, entityType.Name + entityHost.FileExtension);
-                    project.AddNewFile(filePath, entityContents);
+                    models.TryAdd(entityType.Name + entityHost.FileExtension, entityContents);
 
                     var mappingHost = new EfTextTemplateHost
                         {
@@ -196,16 +196,8 @@ namespace Microsoft.DbContextPackage.Handlers
 
                     var mappingContents = templateProcessor.Process(Templates.MappingTemplate, mappingHost);
 
-                    ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
-                                                        projectNamespace,
-                                                        mappingHost.MappingNamespace,
-                                                        mappingNamespaceSuffixDefault,
-                                                        projectDirectory.FullName,
-                                                        ref mappingDirectory);
-
-                    var mappingFilePath = Path.Combine(mappingDirectory, entityType.Name + "Map" + mappingHost.FileExtension);
-                    project.AddNewFile(mappingFilePath, mappingContents);
-                }
+                    maps.TryAdd(entityType.Name + "Map" + mappingHost.FileExtension, mappingContents);
+                });
 
                 // Generate Context
                 _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_GenerateContext;
@@ -225,10 +217,41 @@ namespace Microsoft.DbContextPackage.Handlers
                                                     contextHost.Namespace,
                                                     modelsNamespaceSuffixDefault,
                                                     projectDirectory.FullName,
+                                                    ref contextDirectory);
+
+                var contextFilePath = Path.Combine(contextDirectory, modelGenerator.EntityContainer.Name + contextHost.FileExtension);
+
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_AddingFiles;
+                var contextItem = project.AddNewFile(contextFilePath, contextContents);
+
+                // sync model directory
+                ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
+                                                    defaultProjectNameSpace,
+                                                    contextHost.ModelsNamespace,
+                                                    modelsNamespaceSuffixDefault,
+                                                    projectDirectory.FullName,
                                                     ref modelsDirectory);
 
-                var contextFilePath = Path.Combine(modelsDirectory, modelGenerator.EntityContainer.Name + contextHost.FileExtension);
-                var contextItem = project.AddNewFile(contextFilePath, contextContents);
+                // Add models
+                Parallel.ForEach(models, (file) =>
+                {
+                    project.AddNewFile(Path.Combine(modelsDirectory, file.Key), file.Value);
+                });
+
+                // sync project mapping directory
+                ProjectFilesPathGenUtility.SyncDirectoryWithNamespace(
+                                                    defaultProjectNameSpace,
+                                                    contextHost.MappingNamespace,
+                                                    mappingNamespaceSuffixDefault,
+                                                    projectDirectory.FullName,
+                                                    ref mappingDirectory);
+
+                // Add mappings
+                Parallel.ForEach(maps, (file) =>
+                {
+                    project.AddNewFile(Path.Combine(mappingDirectory, file.Key), file.Value);
+                });
+
                 if (isNewConnectionString)
                 {
                     AddConnectionStringToConfigFile(project, connectionString, providerInvariant, modelGenerator.EntityContainer.Name);
@@ -240,9 +263,8 @@ namespace Microsoft.DbContextPackage.Handlers
                     _package.DTE2.ItemOperations.OpenFile(contextFilePath);
                 }
 
-                var duration = DateTime.Now - startTime;
-                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_Complete(duration.ToString(@"h\:mm\:ss"));
-                //}
+                watcher.Stop();
+                _package.DTE2.StatusBar.Text = Strings.ReverseEngineer_Complete((int)watcher.Elapsed.TotalSeconds);
             }
             catch (Exception exception)
             {
@@ -355,7 +377,7 @@ namespace Microsoft.DbContextPackage.Handlers
             object dbName = null;
             foreach (var alias in aliases)
             {
-                if(builder.TryGetValue(alias, out dbName))
+                if (builder.TryGetValue(alias, out dbName))
                 {
                     return (string)dbName;
                 }

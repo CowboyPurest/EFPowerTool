@@ -164,6 +164,9 @@
   <data name="ProcessTemplateError" xml:space="preserve">
     <value>One or more errors occurred while processing template '{0}'.</value>
   </data>
+  <data name="ReverseEngineer_AddingFiles" xml:space="preserve">
+    <value>Adding files to project...</value>
+  </data>
   <data name="ReverseEngineer_Complete" xml:space="preserve">
     <value>Reverse engineer completed in {0}.</value>
   </data>
@@ -185,7 +188,7 @@
   <data name="ReverseEngineer_InstallEntityFrameworkError" xml:space="preserve">
     <value>An error occurred while trying to install the EntityFramework package. See the Output window for details.</value>
   </data>
-  <data name="ReverseEngineer_LoadSchema" xml:space="preserve">
+  <data name="ReverseEngineer_LoadingSchema" xml:space="preserve">
     <value>Loading schema information...</value>
   </data>
   <data name="ReverseEngineer_SchemaError" xml:space="preserve">
