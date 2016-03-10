@@ -20,13 +20,14 @@ See details here - [Cutom directory heirarchy code generation with custom define
 Issue reported on codeplex: http://entityframework.codeplex.com/workitem/2892
 
 #### 2. Re-use of existing connections when running "Reverse enginner code templates" command
-This change will prompt existing connection string to use instead of creating the connection again via VS Database connection tool. 
+The VS Db connection dialog appearing everytime you run the reverse engineer tool and it was adding new connection string for each run. With this change the tool will prompt to use existing connectionstring instead. It still allows to open the VS Db connection dialog.
 
 ![Connection prompt](http://i.stack.imgur.com/yl2l9.png)
 
 1. Allows to select connection from existing ones.
 2. Allows to create new connection using `[..]` button.
 
+#### 3. Fixed few buggy situations and tweaked performance for code generation. 
 -------------------------
 **Status** - Ready for testing. 
 
